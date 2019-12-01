@@ -1,0 +1,706 @@
+
+---
+title: 'PhD: CSE9099c - Machine Learning Algorithms'
+author: "Jisha Joseph 1845"
+date: "July-27-2018"
+output:
+  pdf_document:
+    toc: yes
+  html_document:
+    toc: yes
+    toc_float: yes
+---
+# Set up the environement
+```{r}
+rm(list=ls(all = T))
+setwd("C:/Users/Hp/Desktop/INSOFE/Jisha Joseph_PhD")
+```
+# List & Load all required libraries here
+```{r message = FALSE}
+library(DMwR)
+library(DataExplorer)
+library(caret)
+library(dplyr)
+library(plyr)
+library(ROCR)
+library(corrplot)
+library(class)
+library(ada)
+library(xgboost)
+library(randomForest)
+library(rpart)
+library(C50)
+library(e1071)
+library(tidyverse)
+library(lubridate)
+library(tidyr)
+library(sqldf)
+library(ggplot2)
+```
+
+# Read & Understand the data
+```{r}
+train_data <- read.csv("Train.csv",header=TRUE)
+test_data <- read.csv("Test.csv",header=TRUE)
+```
+## Keep an Original Copy of Train and test before doing any further processing
+```{r}
+train_data_orig<-train_data
+test_data_orig <- test_data
+```
+## Get a feel of the data and get Insights
+```{r}
+head(train_data)
+head(test_data)
+tail(train_data)
+tail(test_data)
+```
+## Structure & summary of the Train and Test data
+```{r}
+str(train_data)
+summary(train_data)
+summary(test_data) 
+str(test_data)
+```
+# Target Attribute Derivation
+## Convert ActualArrivalTimeStamp to POSIX type using Lubridate Library
+```{r}
+##Train data
+train_data$ActualArrivalTSnew<-train_data[['ActualArrivalTimeStamp']]
+train_data$ActualArrivalTSnew<-dmy_hm(train_data$ActualArrivalTSnew)
+str(train_data)
+head(train_data)
+```
+## Drop ActualArrivalTimeStamp as a new column has been created from it
+```{r}
+train_data$ActualArrivalTimeStamp=NULL
+```
+## Convert ScheduledArrTime to HH:MM format
+```{r}
+##Train Data
+train_data$ScheduledArrTime<-sprintf("%04d",train_data$ScheduledArrTime)
+format(strptime(train_data$ScheduledArrTime, format="%H%M"), format = "%H:%M")
+
+##Test Data
+
+test_data$ScheduledArrTime<-sprintf("%04d",test_data$ScheduledArrTime)
+format(strptime(test_data$ScheduledArrTime, format="%H%M"), format = "%H:%M")
+```
+## Merge the Expected arrival into the same format of Actual Arrival
+```{r}
+
+##Train Data
+train_data<-unite(train_data,"ExpectedArrival",c("Year","Month","DayofMonth","ScheduledArrTime"),sep = '/',remove = TRUE)
+train_data$ExpectedArrival<-ymd_hm(train_data$ExpectedArrival)
+
+##Test Data
+test_data<-unite(test_data,"ExpectedArrival",c("Year","Month","DayofMonth","ScheduledArrTime"),sep = '/',remove = TRUE)
+test_data$ExpectedArrival<-ymd_hm(test_data$ExpectedArrival)
+```
+## Calculate the difference in Minutes
+```{r}
+difference <- difftime(train_data$ActualArrivalTSnew,train_data$ExpectedArrival, units='mins')
+#difference
+```
+
+## Check if the difference is greater than 15 mins, then Create the Target attribute-FlightDelayStatus as 'Yes' else 'No'
+```{r}
+FlightDelayStatus<-ifelse(difference > 15,'Yes','No')
+#FlightDelayStatus
+```
+## Add the FlightDelayStatus to the Train dataframe
+```{r}
+train_data<-cbind(train_data,difference)
+train_data<-cbind(train_data,FlightDelayStatus)
+str(train_data)
+str(test_data)
+```
+## Convert attributes to required data types
+```{r}
+## Train Data
+
+train_data$DayOfWeek <- as.factor(as.character(train_data$DayOfWeek))
+
+train_data$ScheduledDepTime<-as.numeric(train_data$ScheduledDepTime)
+train_data$ScheduledDepTime<-sprintf("%04d",train_data$ScheduledDepTime)
+format(strptime(train_data$ScheduledDepTime, format="%H%M"), format = "%H:%M")
+train_data$difference<-as.numeric(train_data$difference)
+
+## Test data
+
+test_data$DayOfWeek <- as.factor(as.character(test_data$DayOfWeek))
+test_data$ScheduledDepTime<-as.numeric(test_data$ScheduledDepTime)
+test_data$ScheduledDepTime<-sprintf("%04d",test_data$ScheduledDepTime)
+format(strptime(test_data$ScheduledDepTime, format="%H%M"), format = "%H:%M")
+
+```
+
+#Check Uniquesness of Flightnumber
+```{r}
+unique(train_data$FlightNumber)
+unique(test_data$FlightNumber)
+```
+## Observations of Test and Train
+*Remove Difference from Train in case of Classification/Keep in case of regression to derive Target as the same way as of Train
+*DayOfWeek has near zero variance from the plot.Hence remove.
+*Levels for Origin and Destination to be added to Test data
+```{r}
+train_data_bkp<-train_data
+delete <- c("difference","DayOfWeek")
+train_data<-train_data[,!(colnames(train_data) %in% delete),drop=FALSE]
+test_data$DayOfWeek=NULL
+```
+## Univariate and Bivariate Analysis
+* Univariate Analysis; Check if there are Outliers
+```{r}
+boxplot(train_data$ScheduledTravelTime)
+```
+* Bar Plot to check Kurtosis and Skewness
+```{r}
+ggplot(train_data,aes(x=FlightDelayStatus)) + geom_bar()
+```
+* Target is imbalanced as from the above plot.Hence have to balance the target
+* Bivariate Analysis
+```{r}
+ggplot(train_data_orig,aes(x=train_data_orig$Distance,
+           y=train_data_orig$ScheduledTravelTime)) + 
+geom_point(size=2)
+```
+
+## Split Categorical and Numerical Attributes
+```{r}
+num_attr<-c("ScheduledDepTime","ScheduledArrTime","ScheduledTravelTime","Distance")
+cat_attr<-setdiff(colnames(train_data_orig),num_attr)
+cat_attr
+```
+## Check Correlation Plot
+```{r}
+num_attr_df<-data.frame(train_data_orig[,num_attr])
+#is.numeric((train_data_orig[,"FlightNumber"]))
+cor_num_attr_df<-cor(num_attr_df)
+#corrplot(cor_num_attr_df, method = "square")
+corrplot(cor_num_attr_df, method = "number")
+```
+## Remove Distance as it is highly correlated(0.98) with ScheduledTravelTime
+## Remove ScheduledDepTime as it is highly correlated with ScheduledTravelTime
+```{r}
+train_data$Distance=NULL
+test_data$Distance=NULL
+train_data$ScheduledDepTime=NULL
+test_data$ScheduledDepTime=NULL
+```
+# ###################Start of Weather Data Processing##########################
+##Read AllStationsData_PHD as a dataframe
+```{r}
+AllStations<-read.table("AllStationsData_PHD.txt",sep="|", header=TRUE)
+```
+## Understand the data
+```{r}
+str(AllStations)
+dim(AllStations)
+```
+## Split Categorical and Numerical Attributes for AllStations Data
+```{r}
+cat_attr_alls<-c("AirportID","TimeZone")
+num_attr_alls<-setdiff(colnames(AllStations),cat_attr_alls)
+num_attr_alls
+```
+## Check Correlation Plot
+```{r}
+num_attr_dfalls<-data.frame(AllStations[,num_attr_alls])
+cor_num_attr_dfalls<-cor(num_attr_dfalls)
+#corrplot(cor_num_attr_df, method = "square")
+corrplot(cor_num_attr_dfalls, method = "number")
+```
+## Remove correlated attributes from AllStations Data before merging with Train Data
+* Remove BarometerHeight as it is fully correlated with GroundHeight
+* BarometerHeight and StationHeight are highly correlated.(0.84)
+* Remove StationHeight as it is highly correlated with GroundHeight(0.84)
+```{r}
+AllStations$BarometerHeight=NULL
+AllStations$StationHeight=NULL
+```
+## Missing Values Check and Imputation in AllStations
+```{r}
+sort(colSums(is.na(AllStations))/nrow(AllStations)*100, decreasing = T)
+```
+## Split Categorical and Numerical Attributes for AllStations Data after removal
+```{r}
+cat_attr_alls<-c("AirportID","TimeZone")
+num_attr_alls<-setdiff(colnames(AllStations),cat_attr_alls)
+num_attr_alls
+```
+
+## Check for the Origin and Destination Levels mismatched in Train and test
+* Mismatched levels to be added
+```{r}
+unique(train_data$Origin[!(train_data$Origin %in% test_data$Origin)])
+```
+## Use sqldf for joining AllStations and Train data,Test Data;deleted AirportID
+```{r}
+train_allst<-sqldf("SELECT train_data.*,AllStations.* FROM train_data
+LEFT OUTER JOIN AllStations ON AllStations.AirportID = train_data.Destination")
+train_allst<-train_allst[,-6]  #-->Actual ActualArrivalTSnew
+train_allst<-train_allst[,-8]  #-->AirportID
+
+test_allst<-sqldf("SELECT test_data.*,AllStations.* FROM test_data
+LEFT OUTER JOIN AllStations ON AllStations.AirportID = test_data.Destination")
+test_allst<-test_allst[,-8]
+```
+#  Hourly and hpd processing
+## Read 2004Hourly and HPD file to see the data
+```{r}
+df200401hrly<-read.table("200401hourly.txt",sep=",", header=TRUE)
+df200401hpd<-read.table("200401hpd.txt",sep = ",",header = TRUE)
+df200403hrly<-read.table("200403hourly.txt",sep=",", header=TRUE)
+df200403hpd<-read.table("200403hpd.txt",sep = ",",header = TRUE)
+df200405hrly<-read.table("200405hourly.txt",sep=",", header=TRUE)
+df200405hpd<-read.table("200405hpd.txt",sep = ",",header = TRUE)
+df200407hrly<-read.table("200407hourly.txt",sep=",", header=TRUE)
+df200407hpd<-read.table("200407hpd.txt",sep = ",",header = TRUE)
+df200409hrly<-read.table("200409hourly.txt",sep=",", header=TRUE)
+df200409hpd<-read.table("200409hpd.txt",sep = ",",header = TRUE)
+df200411hrly<-read.table("200411hourly.txt",sep=",", header=TRUE)
+df200411hpd<-read.table("200411hpd.txt",sep = ",",header = TRUE)
+```
+## Merge all the hpd and hourly rows into one Dataframe
+```{r}
+df2004hrly<-rbind(df200401hrly,df200403hrly,df200405hrly,df200407hrly,df200409hrly,df200411hrly)
+rm(df200403hrly,df200405hrly,df200407hrly,df200409hrly,df200411hrly)
+df2004hpd<-rbind(df200401hpd,df200403hpd,df200405hpd,df200407hpd,df200409hpd,df200411hpd)
+rm(df200403hpd,df200405hpd,df200407hpd,df200409hpd,df200411hpd)
+#rm(df200401hpd) 
+#rm(df200401hrly)
+```
+## Structure of HPD and Hourly
+```{r}
+str(df2004hpd)
+str(df2004hrly)
+```
+## Missing Values Check and Imputation
+```{r}
+sort(colSums(is.na(df2004hrly))/nrow(df2004hrly)*100, decreasing = T)
+sort(colSums(is.na(df2004hpd))/nrow(df2004hpd)*100, decreasing = T)
+```
+## Let's use Central imputation from DmWR package to impute missing values
+```{r}
+df2004hrly <- centralImputation(df2004hrly)
+df2004hpd <- centralImputation(df2004hpd)
+#df200401hpd<-centralImputation(df200401hpd) -->Testing Purpose
+```
+## Check if NA values are filled
+```{r}
+colSums(is.na(df2004hpd))
+colSums(is.na(df2004hrly))
+```
+
+## Process hpd data 2004
+## Convert and Merge the Timestamp in 2004hpd to Same as train_allst
+## Convert ScheduledArrTime to HH:MM format
+```{r}
+##HPD Train Data
+# Convert Time to Numeric and then to HH:MM format
+df2004hpd$Time<-as.numeric(df2004hpd$Time)
+df2004hpd$Time<-sprintf("%04d",df2004hpd$Time)
+format(strptime(df2004hpd$Time, format="%H%M"), format = "%H:%M")
+str(df2004hpd)
+```
+
+## Merge date and Time in hpd
+```{r}
+##hpd Train Data
+df2004hpd<-unite(df2004hpd,"Timestamp",c("YearMonthDay","Time"),remove = TRUE)
+df2004hpd$Timestamp<-ymd_hm(df2004hpd$Timestamp)
+str(df2004hpd)
+df2004hpdb<-df2004hpd
+
+```
+
+## Aggregate Time into 6-hour-wide intervals for 2004hpd and Train data
+```{r}
+## Train Data
+#############
+# Aggregate each Timestamp into corresponding hour
+traints<-cut.POSIXt(train_allst$ExpectedArrival, breaks = "6 hours")
+traints
+traindf<-as.data.frame.Date(traints)
+str(traindf)
+traindf$traints<-as.POSIXct(traindf$traints)
+traindf$traints<-traindf$traints - 3600
+c<-cbind(train_allst,traindf)
+train_allst<-c[,-2]  #-->Remove Actual Timestamp
+colnames(train_allst)[11]<-"ExpectedArrival"
+
+# HPD data
+##########
+
+df2004hpdts<-cut.POSIXt(df2004hpd$Timestamp, breaks = "6 hours")
+b<-as.data.frame.Date(df2004hpdts)
+str(b)
+c<-cbind(df2004hpd,b)
+df2004hpd<-c[,-2]  ##-->Remove Actual Time
+colnames(df2004hpd)[3]<-"Timestamp"
+
+
+df2004hpd<-aggregate(HourlyPrecip~WeatherStationID+Timestamp,data=df2004hpd,FUN=function(df2004hpd) mean(df2004hpd))
+
+
+```
+## Use merge for joining train_allst with hpd data
+```{r}
+trallst_hpd<-merge(x=train_allst,y=df2004hpd,by.x=c("WeatherStationID","ExpectedArrival"),by.y=c("WeatherStationID","Timestamp"),all.x=TRUE)
+
+```
+
+## Process hourly data 2004
+## Split Categorical and Numerical Attributes for Hourly Data
+```{r}
+str(df2004hrly)
+cat_attr_alls<-c("SkyConditions","Visibility","WindDirection","WindSpeed")
+num_attr_alls<-setdiff(colnames(df2004hrly),cat_attr_alls)
+num_attr_alls
+```
+
+## Check Correlation Plot for df2004hrly
+```{r}
+num_attr_dfalls<-data.frame(df2004hrly[,num_attr_alls])
+cor_num_attr_dfalls<-cor(num_attr_dfalls)
+#corrplot(cor_num_attr_df, method = "square")
+corrplot(cor_num_attr_dfalls, method = "number")
+```
+## Remove correlated attributes
+* Remove DewPointTemp as it is highly correlated(0.81) to DBT
+* Remove WindDirection as it is highly correlated to Windspeed (p-value-2.2e-16)
+* Remove Skyconditions as it is highly correlated to Visibility(p-value-2.2e-16)
+
+```{r}
+df2004hrly$DewPointTemp=NULL
+df2004hrly$WindDirection=NULL
+df2004hrly$SkyConditions=NULL
+```
+
+## Convert and Merge the Timestamp in 2004hourly to Same as trallst_hpd
+## Convert ScheduledArrTime to HH:MM format
+```{r}
+##Hourly Train Data
+# Convert Time to Numeric and then to HH:MM format
+df2004hrlyb<-df2004hrly
+df2004hrly$Time<-as.numeric(df2004hrly$Time)
+df2004hrly$Time<-sprintf("%04d",df2004hrly$Time)
+format(strptime(df2004hrly$Time, format="%H%M"), format = "%H:%M")
+str(df2004hrly)
+```
+
+## Merge date and Time in hourly
+```{r}
+##hourly Train Data
+df2004hrlyb<-df2004hrly
+df2004hrly<-unite(df2004hrly,"Timestamp",c("YearMonthDay","Time"),remove = TRUE)
+df2004hrly$Timestamp<-ymd_hm(df2004hrly$Timestamp)
+str(df2004hrly)
+```
+
+## Aggregate Time into 6-hour-wide intervals for 2004hourly data
+```{r}
+# Hourly data
+#############
+# Aggregate each Timestamp into 6 hour window
+df2004hrlyts<-cut.POSIXt(df2004hrly$Timestamp, breaks = "6 hours")
+b<-as.data.frame.Date(df2004hrlyts)
+str(b)
+c<-cbind(df2004hrly,b)
+df2004hrly<-c[,-2]
+colnames(df2004hrly)[8]<-"Timestamp"
+
+#Calculate the mean of HourlyPrecip grouped on WeatherStationID+Timestamp 
+df2004hrly<-aggregate(cbind(Visibility,DBT,RelativeHumidityPercent,WindSpeed,WindGustValue,StationPressure)~WeatherStationID+Timestamp,data=df2004hrly,FUN=function(df2004hrly) mean(df2004hrly))
+
+```
+
+## Merge hourly data with trallst_hpd
+```{r}
+trallsthpd_hrly<-merge(x=trallst_hpd,y=df2004hrly,by.x=c("WeatherStationID","ExpectedArrival"),by.y=c("WeatherStationID","Timestamp"),all.x=TRUE)
+```
+## Check for NA values in the final trallsthpd_hrly dataframe
+## Missing Values Check and Imputation
+```{r}
+sort(colSums(is.na(trallsthpd_hrly))/nrow(trallsthpd_hrly)*100, decreasing = T)
+```
+## Let's use Central imputation from DmWR package to impute missing values
+```{r}
+trallsthpd_hrly <- centralImputation(trallsthpd_hrly)
+```
+## Check if NA values are filled
+```{r}
+colSums(is.na(trallsthpd_hrly))
+```
+# Test hpd and hourly Processing
+## Read 2005Hourly and HPD file to see the data
+## Process 2005hpd data for test
+```{r}
+df200503hrly<-read.table("200503hourly.txt",sep=",", header=TRUE)
+df200503hpd<-read.table("200503hpd.txt",sep = ",",header = TRUE)
+df200507hrly<-read.table("200507hourly.txt",sep=",", header=TRUE)
+df200507hpd<-read.table("200507hpd.txt",sep = ",",header = TRUE)
+df200509hrly<-read.table("200509hourly.txt",sep=",", header=TRUE)
+df200509hpd<-read.table("200509hpd.txt",sep = ",",header = TRUE)
+df200511hrly<-read.table("200511hourly.txt",sep=",", header=TRUE)
+df200511hpd<-read.table("200511hpd.txt",sep = ",",header = TRUE)
+```
+## Merge all the 2005hpd and hourly rows into one Dataframe for test
+```{r}
+df2005hrly<-rbind(df200503hrly,df200507hrly,df200509hrly,df200511hrly)
+rm(df200503hrly,df200507hrly,df200509hrly,df200511hrly)
+df2005hpd<-rbind(df200503hpd,df200507hpd,df200509hpd,df200511hpd)
+rm(df200503hpd,df200507hpd,df200509hpd,df200511hpd)
+```
+## Structure of HPD and Hourly
+```{r}
+str(df2005hpd)
+str(df2005hrly)
+```
+## Missing Values Check and Imputation
+```{r}
+sort(colSums(is.na(df2005hrly))/nrow(df2005hrly)*100, decreasing = T)
+sort(colSums(is.na(df2005hpd))/nrow(df2005hpd)*100, decreasing = T)
+```
+## Let's use Central imputation from DmWR package to impute missing values
+```{r}
+df2005hrly <- centralImputation(df2005hrly)
+df2005hpd <- centralImputation(df2005hpd)
+```
+## Check if NA values are filled
+```{r}
+colSums(is.na(df2005hpd))
+colSums(is.na(df2005hrly))
+```
+
+## Process hpd data 2005
+## Convert and Merge the Timestamp in 2005hpd to Same as train_allst
+## Convert ScheduledArrTime to HH:MM format
+```{r}
+##HPD Test Data
+# Convert Time to Numeric and then to HH:MM format
+df2005hpd$Time<-as.numeric(df2005hpd$Time)
+df2005hpd$Time<-sprintf("%04d",df2005hpd$Time)
+format(strptime(df2005hpd$Time, format="%H%M"), format = "%H:%M")
+str(df2005hpd)
+```
+## Merge date and Time in hpd
+```{r}
+##hpd Test Data
+df2005hpd<-unite(df2005hpd,"Timestamp",c("YearMonthDay","Time"),remove = TRUE)
+df2005hpd$Timestamp<-ymd_hm(df2005hpd$Timestamp)
+str(df2005hpd)
+df2005hpdb<-df2005hpd
+```
+
+## Aggregate Time into 6-hour-wide intervals for 2005hpd and Test data
+```{r}
+## Test Data
+#############
+#
+tests<-cut.POSIXt(test_allst$ExpectedArrival, breaks = "6 hours")
+tests
+testdf<-as.data.frame.Date(tests)
+str(testdf)
+testdf$tests<-as.POSIXct(testdf$tests)
+#testdf$tests<-testdf$tests - 3600
+c<-cbind(test_allst,testdf)
+
+test_allst<-c[,-2]  #-->Remove Actual Timestamp
+colnames(test_allst)[11]<-"ExpectedArrival"
+
+# HPD data
+##########
+
+df2005hpdts<-cut.POSIXt(df2005hpd$Timestamp, breaks = "6 hours")
+b<-as.data.frame.Date(df2005hpdts)
+str(b)
+c<-cbind(df2005hpd,b)
+df2005hpd<-c[,-2]  ##-->Remove Actual Time
+colnames(df2005hpd)[3]<-"Timestamp"
+
+ 
+df2005hpd<-aggregate(HourlyPrecip~WeatherStationID+Timestamp,data=df2005hpd,FUN=function(df2005hpd) mean(df2005hpd))
+```
+## Use merge for joining test_allst with hpd data
+```{r}
+tsallst_hpd<-merge(x=test_allst,y=df2005hpd,by.x=c("WeatherStationID","ExpectedArrival"),by.y=c("WeatherStationID","Timestamp"),all.x=TRUE)
+
+```
+
+## Remove correlated attributes as had removed in train due to high correlation
+* Remove DewPointTemp as it is highly correlated(0.81) to DBT
+* Remove WindDirection as it is highly correlated to Windspeed (p-value-2.2e-16)
+* Remove Skyconditions as it is highly correlated to Visibility(p-value-2.2e-16)
+
+```{r}
+df2005hrly$DewPointTemp=NULL
+df2005hrly$WindDirection=NULL
+df2005hrly$SkyConditions=NULL
+str(df2005hrly)
+```
+
+## Convert and Merge the Timestamp in 2005hourly to Same as tsallst_hpd
+## Convert ScheduledArrTime to HH:MM format
+```{r}
+##Hourly Test Data
+# Convert Time to Numeric and then to HH:MM format
+
+df2005hrlyb<-df2005hrly
+df2005hrly$Time<-as.numeric(df2005hrly$Time)
+df2005hrly$Time<-sprintf("%04d",df2005hrly$Time)
+format(strptime(df2005hrly$Time, format="%H%M"), format = "%H:%M")
+str(df2005hrly)
+```
+
+## Merge date and Time in hourly test
+```{r}
+##hourly Test Data
+df2005hrlyb<-df2005hrly
+df2005hrly<-unite(df2005hrly,"Timestamp",c("YearMonthDay","Time"),remove = TRUE)
+df2005hrly$Timestamp<-ymd_hm(df2005hrly$Timestamp)
+str(df2005hrly)
+```
+
+## Aggregate Time into 6-hour-wide intervals for 2005hourly data
+```{r}
+# Hourly data
+#############
+# Aggregate each Timestamp into 6 hour window
+df2005hrlyts<-cut.POSIXt(df2005hrly$Timestamp, breaks = "6 hours")
+b<-as.data.frame.Date(df2005hrlyts)
+str(b)
+c<-cbind(df2005hrly,b)
+df2005hrly<-c[,-2]
+colnames(df2005hrly)[8]<-"Timestamp"
+
+
+df2005hrly<-aggregate(cbind(Visibility,DBT,RelativeHumidityPercent,WindSpeed,WindGustValue,StationPressure)~WeatherStationID+Timestamp,data=df2005hrly,FUN=function(df2005hrly) mean(df2005hrly))
+```
+
+## Merge hourly data with tsallst_hpd
+```{r}
+tsallsthpd_hrly<-merge(x=tsallst_hpd,y=df2005hrly,by.x=c("WeatherStationID","ExpectedArrival"),by.y=c("WeatherStationID","Timestamp"),all.x=TRUE)
+```
+## Check for NA values in the final tsallsthpd_hrly dataframe
+## Missing Values Check and Imputation
+```{r}
+sort(colSums(is.na(tsallsthpd_hrly))/nrow(tsallsthpd_hrly)*100, decreasing = T)
+```
+## Let's use Central imputation from DmWR package to impute missing values
+```{r}
+tsallsthpd_hrly <- centralImputation(tsallsthpd_hrly)
+```
+## Check if NA values are filled
+```{r}
+colSums(is.na(tsallsthpd_hrly))
+```
+##   #######################End of Weather Data Processing#################
+
+## Split Categorical and Numerical Attributes
+```{r}
+cat_attr<-c("FlightNumber","Origin","Destination","FlightDelayStatus","TimeZone","ExpectedArrival")
+num_attr<-setdiff(colnames(train_data),cat_attr)
+num_attr
+```
+## Check Correlation Plot
+```{r}
+num_attr_df<-data.frame(train_data[,num_attr])
+cor_num_attr_df<-cor(num_attr_df)
+#corrplot(cor_num_attr_df, method = "square")
+corrplot(cor_num_attr_df, method = "number")
+```
+
+* Remove GroundHeight as it is highly negatively correlated to StationPressure(-0.96)
+* Remove TimeZone as it is highly correlated to ExpectedArrival
+```{r}
+train_data$GroundHeight=NULL
+test_data$GroundHeight=NULL
+train_data$TimeZone=NULL
+test_data$TimeZone=NULL
+colnames(train_data)
+```
+## Backups of Data and Removal of attributes as needed
+```{r}
+## Backups of main data
+trn_data<-train_data
+tst_data<-test_data
+
+#train_data<-trn_data
+#test_data<-tst_data
+
+train_data<-trallsthpd_hrly
+test_data<-tsallsthpd_hrly
+FlightNumber<-tst_data$FlightNumber
+```
+# Remove Origin and Destination as the data required is captured in WeatherStationID and ScheduledTravelTime
+```{r}
+delete <- c("Origin","Destination","FlightNumber")
+train_data<-train_data[,!(colnames(train_data) %in% delete),drop=FALSE]
+test_data<-test_data[,!(colnames(test_data) %in% delete),drop=FALSE]
+```
+## Bivariate Analysis
+* DBT and RelativeHumidityPercent(Slight negative correlation)
+```{r}
+ggplot(train_data,aes(x=DBT,
+           y=RelativeHumidityPercent)) + 
+geom_point(size=2)+ggtitle("DBT VS RelativeHumidityPercent")
+```
+# ############################### Basic Model Building #############################
+## Train-Validation split
+```{r}
+set.seed(715)
+train_rows <- createDataPartition(train_data$FlightDelayStatus, p = 0.75, list = F )
+train_data <- train_data[train_rows, ]
+validation_data <- train_data[-train_rows, ]
+```
+## Check for the proportion of Target distribution of classes
+```{r}
+table(train_data$FlightDelayStatus)
+table(validation_data$FlightDelayStatus)
+```
+* Confirm equal distribution of Status in train & validation.Imbalanced Data;Have to balance in further processing
+```{r}
+prop.table(table(train_data$FlightDelayStatus))
+prop.table(table(validation_data$FlightDelayStatus))
+#class(train_data$FlightDelayStatus)
+``` 
+## Make equal distribution of Target using SMOTE-->Do later
+```{r}
+#
+```
+
+# Build C5.0 Decision Trees
+```{r}
+#class(train_data$ExpectedArrival)-->POSIXt
+#trndbfex<-train_data
+#tstbfex<-test_data
+#valbfex<-validation_data
+
+train_data$ExpectedArrival=as.numeric(train_data$ExpectedArrival)
+validation_data$ExpectedArrival=as.numeric(validation_data$ExpectedArrival)
+test_data$ExpectedArrival=as.numeric(test_data$ExpectedArrival)
+c5_tree <- C5.0(FlightDelayStatus ~ ., data = train_data)
+summary(c5_tree)
+plot(c5_tree)
+```
+##Prediction on Validation data
+```{r}
+preds_val<-predict(c5_tree,validation_data)
+confusionMatrix(preds_val,validation_data$FlightDelayStatus)
+```
+## F1 score on Validation data-->90.6%
+## Accuracy on Validation Data-->83.89%
+```{r}
+F1_Score(y_true =validation_data$FlightDelayStatus,y_pred = preds_val)
+Accuracy(y_true =validation_data$FlightDelayStatus,y_pred = preds_val)
+```
+## Test Data Prediction F1 Score-->24.96%
+```{r}
+pred_test <- predict(c5_tree, test_data, type = "class")
+FlightDelayStatus<-as.character(pred_test) 
+preds_c50<-cbind(FlightNumber,FlightDelayStatus)
+write.csv(preds_c50,"submission_c50.csv",row.names = F)
+```
